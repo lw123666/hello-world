@@ -14,8 +14,7 @@ struct BPB {
 } bpb;
 
 struct Entry {
-    char Name[9];//文件名
-    char Ext[4];//扩展名
+    char Name[13];//文件名，包括扩展名
     int FstClus;//开始簇号
     int Type; // 文件为0,目录为1
     struct Entry *Next, *Children;
@@ -34,81 +33,86 @@ void lowerStr(char* str) {
     }
 }
 
-int get_int(int offset, int len)
+int getIntValue(int base, int len)
 {
-    int result = 0, i;
-    for (i = offset + len - 1; i >= offset; --i) {
+    int result = 0;
+    int i;
+    for (i = base + len - 1; i >= base; --i) {
         result = result * 256 + image[i];
     }
     return result;
 }
-
-int get_next_clus(int curr_clus) {
-    int clus_id = curr_clus / 2,
-            fat_value = get_int(bpb.RsvdSecCnt * bpb.BytsPerSec + clus_id * 3, 3);
-    if (curr_clus % 2 == 0) {
-        return fat_value & 0x000fff;
+//一次读取六字节,奇数号高三位,偶数号低三位
+int nextClus(int clus) {
+    int num = clus / 2;
+    int value = getIntValue(bpb.RsvdSecCnt * bpb.BytsPerSec + num * 3, 3);
+    if (clus % 2 == 0) {
+        return value & 0x000fff;
     } else {
-        return (fat_value & 0xfff000) / 0x1000;
+        return (value & 0xfff000) / 0x1000;
     }
 }
 
 
-void setBPB()
-{
-    bpb.BytsPerSec = get_int(11, 2);
-    bpb.SecPerClus = get_int(13, 1);
-    bpb.RsvdSecCnt = get_int(14, 2);
-    bpb.NumFATs = get_int(16, 1);
-    bpb.RootEntCnt = get_int(17, 2);
-    bpb.FATSz16 = get_int(22, 2);
+void setBPB(){
+    bpb.BytsPerSec = getIntValue(11, 2);
+    bpb.SecPerClus = getIntValue(13, 1);
+    bpb.RsvdSecCnt = getIntValue(14, 2);
+    bpb.NumFATs = getIntValue(16, 1);
+    bpb.RootEntCnt = getIntValue(17, 2);
+    bpb.FATSz16 = getIntValue(22, 2);
 }
 
-void get_dir(struct Entry* entry) {
-    int clus = entry->FstClus, is_root = 1, i,
-            offset = (bpb.RsvdSecCnt + bpb.FATSz16 * bpb.NumFATs) * bpb.BytsPerSec;
+void createTree(struct Entry* entry) {
+    int clus = entry->FstClus;
+    int isRoot = 1;
+    int base = (bpb.RsvdSecCnt + bpb.FATSz16 * bpb.NumFATs) * bpb.BytsPerSec;
     if (clus >= 2) {
-        // 数据
-        is_root = 0;
-        offset += bpb.RootEntCnt * 32 + (clus - 2) * bpb.BytsPerSec * bpb.SecPerClus;
+        // 数据区
+        isRoot = 0;
+        base = base + bpb.RootEntCnt * 32 + (clus - 2) * bpb.BytsPerSec * bpb.SecPerClus;
     }
-    for (i = offset; ; i += 32) {
+    int i;
+    for (i = base; ; i += 32) {
         // 完成与否
-        if (is_root == 1 && i >= offset + bpb.RootEntCnt * 32) {
+        if (isRoot == 1 && i >= base + bpb.RootEntCnt * 32) {
             break;
-        } else if (is_root == 0 && i >= offset + bpb.BytsPerSec * bpb.SecPerClus) {
-            if ((clus = get_next_clus(clus)) >= 0xff7) {
+        } else if (isRoot == 0 && i >= base + bpb.BytsPerSec * bpb.SecPerClus) {
+            if ((clus = nextClus(clus)) >= 0xff7) {
                 break;
             } else {
-                i = offset = (bpb.RsvdSecCnt + bpb.FATSz16 * bpb.NumFATs) * bpb.BytsPerSec
-                             + bpb.RootEntCnt * 32 + (clus - 2) * bpb.BytsPerSec * bpb.SecPerClus;
+                i = base = (bpb.RsvdSecCnt + bpb.FATSz16 * bpb.NumFATs) * bpb.BytsPerSec + bpb.RootEntCnt * 32 + (clus - 2) * bpb.BytsPerSec * bpb.SecPerClus;
             }
         }
         // 过滤
         if (image[i] != '.' && image[i] != 0 && image[i] != 5 && image[i] != 0xE5
             && image[i + 0xB] != 0xF && (image[i + 0xB] & 0x2) == 0) {
             struct Entry* new_entry = malloc(sizeof(struct Entry));
-            // entry name
+            
             int j;
             for (j = i; j < i + 8 && image[j] != 0x20; j++) {
                 new_entry->Name[j-i] = image[j];
             }
-            new_entry->Name[j-i] = 0;
-            lowerStr(new_entry->Name);
-            // file or folder
+            
             if ((image[i + 0xB] & 0x10) == 0) {
-                // file
+                // 文件
                 new_entry->Type = 0;
-                for (j = i + 8; j < i + 0xB && image[j] != 0x20; j++) {
-                    new_entry->Ext[j - i - 8] = image[j];
+                new_entry->Name[j-i]='.';
+                int k;
+                for (k = i + 8; k < i + 11 && image[k] != 0x20; k++) {
+                    j++;
+                    new_entry->Name[j - i] = image[k];
                 }
-                new_entry->Ext[j - i - 8] = 0;
-               lowerStr(new_entry->Ext);
+                j++;
+                new_entry->Name[j-i]=0;
+               lowerStr(new_entry->Name);
             } else {
 
                 new_entry->Type = 1;
+                new_entry->Name[j-i]=0;
+                lowerStr(new_entry->Name);
             }
-            new_entry->FstClus = get_int(i + 26, 2);
+            new_entry->FstClus = getIntValue(i + 26, 2);
             new_entry->Next = NULL;
             new_entry->Children = NULL;
 
@@ -123,13 +127,13 @@ void get_dir(struct Entry* entry) {
             }
 
             if (new_entry->Type == 1) {
-                get_dir(new_entry);
+                createTree(new_entry);
             }
         }
     }
 }
 
-void print_dir(struct Entry* entry, char* fullpath) {
+void printAll(struct Entry* entry, char* fullpath) {
     my_print('/',0);
     int i;
     for(i=0;fullpath[i]!=0;i++){
@@ -139,23 +143,11 @@ void print_dir(struct Entry* entry, char* fullpath) {
     my_print('\n',0);
     struct Entry* ptr = entry->Children;
     while(ptr!=NULL){
-        if(ptr->Type==0){
-            int k;
-            for(k=0;ptr->Name[k];k++){
-                my_print(ptr->Name[k], 0);
-            }
-            my_print('.', 0);
-            for(k=0;ptr->Ext[k];k++){
-                my_print(ptr->Ext[k], 0);
-            }
-            my_print(' ', 0);
-        }else{
-            int k;
-            for(k=0;ptr->Name[k];k++){
-                my_print(ptr->Name[k], 1);
-            }
-            my_print(' ', 0);
+        int k;
+        for(k=0;ptr->Name[k];k++){
+            my_print(ptr->Name[k], ptr->Type);
         }
+        my_print(' ', 0);
         ptr=ptr->Next;
     }
     my_print('\n', 0);
@@ -168,47 +160,44 @@ void print_dir(struct Entry* entry, char* fullpath) {
         }
         if (ptr->Type == 1 ) {
             strcat(new_path, ptr->Name);
-            print_dir(ptr, new_path);
+            printAll(ptr, new_path);
         }
         free(new_path);
         ptr = ptr->Next;
     }
 }
 
-void print_file(struct Entry* entry) {
+void printFile(struct Entry* entry) {
     int clus = entry->FstClus;
     while (1) {
-        int i, offset = (bpb.RsvdSecCnt + bpb.FATSz16 * bpb.NumFATs) * bpb.BytsPerSec
-                        + bpb.RootEntCnt * 32 + (clus - 2) * bpb.BytsPerSec * bpb.SecPerClus;
+        int i;
+        int base = (bpb.RsvdSecCnt + bpb.FATSz16 * bpb.NumFATs) * bpb.BytsPerSec + bpb.RootEntCnt * 32 + (clus - 2) * bpb.BytsPerSec * bpb.SecPerClus;
         for (i = 0; i < bpb.BytsPerSec * bpb.SecPerClus; ++i) {
-            my_print(image[i+offset], 0);
+            my_print(image[i+base], 0);
         }
-        if ((clus = get_next_clus(clus)) >= 0xff7) {
+        if ((clus = nextClus(clus)) >= 0xff7) {
             break;
         }
     }
 }
 
-struct Entry* find_file(struct Entry* entry, char* path, char* target) {
+struct Entry* findFile(struct Entry* entry, char* path, char* target) {
     if (strcmp(path, target) == 0) {
         return entry;
     }
     struct Entry* ptr = entry->Children;
     while (ptr != NULL) {
-        char* new_path = malloc(strlen(path) + strlen(ptr->Name) + strlen(ptr->Ext) + 2);
+        char* new_path = malloc(strlen(path) + strlen(ptr->Name) + 2);
         strcpy(new_path, path);
         strcat(new_path, ptr->Name);
-        if (ptr->Type == 0) {
-            strcat(new_path, ".");
-            strcat(new_path, ptr->Ext);
-        }
+
         if (strcmp(new_path, target) == 0) {
             free(new_path);
             return ptr;
         }
         if (ptr->Type == 1) {
             strcat(new_path, "/");
-            struct Entry* result = find_file(ptr, new_path, target);
+            struct Entry* result = findFile(ptr, new_path, target);
             if (result != NULL) {
                 free(new_path);
                 return result;
@@ -320,7 +309,7 @@ int main() {
     fclose(f);
     setBPB();
     root.Type = 1;
-    get_dir(&root);
+    createTree(&root);
     char command[1024];
     while (1) {
 
@@ -339,13 +328,13 @@ int main() {
         if(strcmp(command, "exit")==0){
             exit(0);
         }else if(command[0]=='l'&&command[1]=='s'&&command[3]==0){
-            print_dir(&root, "");
+            printAll(&root, "");
         }else if(strstr(command, "ls ")==command){
             char *path = command + 3;
             if (*path == '/') {
                 path++;
             }
-            struct Entry* entry=find_file(&root, "", path);
+            struct Entry* entry=findFile(&root, "", path);
             if(entry==NULL){
                 char error[]="This path does not exits!";
                 int k;
@@ -361,7 +350,7 @@ int main() {
                 }
                 my_print('\n', 0);
             }else{
-                print_dir(entry, path);
+                printAll(entry, path);
             }
 
         }else if(strstr(command, "cat ")==command){
@@ -369,7 +358,7 @@ int main() {
             if (*path == '/') {
                 path++;
             }
-            struct Entry* entry=find_file(&root, "", path);
+            struct Entry* entry=findFile(&root, "", path);
             if(entry==NULL||entry->Type!=0){
                 char error[]="This is not an output file!";
                 int k;
@@ -378,7 +367,7 @@ int main() {
                 }
                 my_print('\n', 0);
             }else{
-                print_file(entry);
+                printFile(entry);
             }
 
 
@@ -387,7 +376,7 @@ int main() {
             if (*path == '/') {
                 path++;
             }
-            struct Entry* entry=find_file(&root, "", path);
+            struct Entry* entry=findFile(&root, "", path);
             if(entry==NULL||entry->Type!=1){
                 char error[]="This is not a directory!";
                 int k;
